@@ -1,18 +1,41 @@
 import socket
 
 
-def parse_question_section(buf: bytes, qdcount: int) -> bytes:
+def parse_questions(buf: bytes, qdcount: int) -> tuple[bytes, list[tuple[int, bytes, int, int]]]:
     offset = 12
+    questions = []
 
     for _ in range(qdcount):
-        # QNAME is a sequence of length-prefixed labels terminated by a zero byte.
+        name_start = offset
+
         while buf[offset] != 0:
             offset += 1 + buf[offset]
 
         offset += 1  # null terminator
-        offset += 4  # QTYPE (2 bytes) + QCLASS (2 bytes)
+        qname = buf[name_start:offset]
+        qtype = int.from_bytes(buf[offset:offset + 2], byteorder="big")
+        qclass = int.from_bytes(buf[offset + 2:offset + 4], byteorder="big")
+        offset += 4
 
-    return buf[12:offset]
+        questions.append((name_start, qname, qtype, qclass))
+
+    return buf[12:offset], questions
+
+
+def build_answer_section(questions: list[tuple[int, bytes, int, int]]) -> bytes:
+    answers = b""
+
+    for name_start, _, qtype, qclass in questions:
+        answers += (
+            (0xC000 | name_start).to_bytes(2, byteorder="big")
+            + qtype.to_bytes(2, byteorder="big")
+            + qclass.to_bytes(2, byteorder="big")
+            + (60).to_bytes(4, byteorder="big")  # TTL
+            + (4).to_bytes(2, byteorder="big")  # RDLENGTH for IPv4
+            + bytes([8, 8, 8, 8])  # RDATA
+        )
+
+    return answers
 
 
 def main():
@@ -39,7 +62,11 @@ def main():
             flags |= 1 << 15 # set to response flag
 
             # question section
-            question_section = parse_question_section(buf, qdcount)
+            question_section, questions = parse_questions(buf, qdcount)
+
+            # answer section
+            ancount = qdcount
+            answer_section = build_answer_section(questions)
 
             response = (
                 packet_id.to_bytes(2, byteorder="big")
@@ -49,6 +76,7 @@ def main():
                 + nscount.to_bytes(2, byteorder="big")
                 + arcount.to_bytes(2, byteorder="big")
                 + question_section
+                + answer_section
             )
     
             udp_socket.sendto(response, source)
