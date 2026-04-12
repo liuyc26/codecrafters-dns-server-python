@@ -1,34 +1,63 @@
 import socket
 
 
-def parse_questions(buf: bytes, qdcount: int) -> tuple[bytes, list[tuple[int, bytes, int, int]]]:
+def decode_name(buf: bytes, offset: int) -> tuple[list[bytes], int]:
+    labels = []
+    next_offset = offset
+    jumped = False
+
+    while True:
+        length = buf[offset]
+
+        if length & 0xC0 == 0xC0:
+            pointer = ((length & 0x3F) << 8) | buf[offset + 1]
+            if not jumped:
+                next_offset = offset + 2
+                jumped = True
+            offset = pointer
+            continue
+
+        if length == 0:
+            if not jumped:
+                next_offset = offset + 1
+            break
+
+        offset += 1
+        labels.append(buf[offset:offset + length])
+        offset += length
+
+    return labels, next_offset
+
+
+def encode_name(labels: list[bytes]) -> bytes:
+    return b"".join(len(label).to_bytes(1, byteorder="big") + label for label in labels) + b"\x00"
+
+
+def parse_questions(buf: bytes, qdcount: int) -> tuple[bytes, list[tuple[bytes, int, int]]]:
     offset = 12
+    question_section = b""
     questions = []
 
     for _ in range(qdcount):
-        name_start = offset
-
-        while buf[offset] != 0:
-            offset += 1 + buf[offset]
-
-        offset += 1  # null terminator
-        qname = buf[name_start:offset]
+        labels, offset = decode_name(buf, offset)
+        qname = encode_name(labels)
         qtype = int.from_bytes(buf[offset:offset + 2], byteorder="big")
         qclass = int.from_bytes(buf[offset + 2:offset + 4], byteorder="big")
         offset += 4
 
-        questions.append((name_start, qname, qtype, qclass))
+        question_section += qname + qtype.to_bytes(2, byteorder="big") + qclass.to_bytes(2, byteorder="big")
+        questions.append((qname, qtype, qclass))
 
-    return buf[12:offset], questions
+    return question_section, questions
 
 
-def build_answer_section(questions: list[tuple[int, bytes, int, int]]) -> bytes:
+def build_answer_section(questions: list[tuple[bytes, int, int]]) -> bytes:
     answers = b""
 
-    for name_start, _, qtype, qclass in questions:
+    for qname, _, qclass in questions:
         answers += (
-            (0xC000 | name_start).to_bytes(2, byteorder="big")
-            + qtype.to_bytes(2, byteorder="big")
+            qname
+            + (1).to_bytes(2, byteorder="big")
             + qclass.to_bytes(2, byteorder="big")
             + (60).to_bytes(4, byteorder="big")  # TTL
             + (4).to_bytes(2, byteorder="big")  # RDLENGTH for IPv4
